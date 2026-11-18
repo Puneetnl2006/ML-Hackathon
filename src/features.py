@@ -105,10 +105,16 @@ def extract_trip_features(
     trip_dir: str | Path,
     dataset: str,
     match_radius_meters: float = DEFAULT_MATCH_RADIUS_METERS,
+    *,
+    trip_data: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
     """Create one feature row per observation/candidate road arc."""
     trip_dir = Path(trip_dir)
-    trip = load_trip(trip_dir)
+    trip = (
+        trip_data
+        if trip_data is not None
+        else load_trip(trip_dir, include_route=dataset == "train")
+    )
     track, nodes, arcs = trip["track"], trip["nodes"], trip["arcs"]
     if track.empty:
         LOGGER.warning("Skipping trip %s: no valid GPS observations", trip_dir)
@@ -188,7 +194,11 @@ def extract_trip_features(
         reference_lat,
     )
     headings, speeds, accelerations = _track_motion(track)
-    route_arc_ids = set(trip["route"]["arc_id"].to_numpy(dtype=np.int64))
+    route_arc_ids = (
+        set(trip["route"]["arc_id"].to_numpy(dtype=np.int64))
+        if dataset == "train"
+        else set()
+    )
     records: list[dict[str, float | int | str | bool]] = []
 
     for observation_index, point in enumerate(projected_track):

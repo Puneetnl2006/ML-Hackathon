@@ -151,6 +151,41 @@ for model selection or optimization. Outputs include
 `optimization_best_params.json`. Increase `--n-trials` for a broader search;
 `--cv-splits` controls the number of GroupKFold folds.
 
+## Run the FastAPI inference server
+
+After generating `outputs/feature_scaler.joblib` and a tuned or baseline
+`.joblib` model, start the server from the repository root:
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+Check server availability with `GET /health`.
+
+The `/predict_route` endpoint accepts either a dataset trip ID or an unsigned
+raw trip payload:
+
+```bash
+curl -X POST http://localhost:8000/predict_route \
+  -H "Content-Type: application/json" \
+  -d '{"trip_id":"00000000"}'
+```
+
+For raw inference, include `track`, `nodes`, and `arcs` arrays under `trip`:
+
+```bash
+curl -X POST http://localhost:8000/predict_route \
+  -H "Content-Type: application/json" \
+  -d '{"trip":{"track":[[8.0,49.0,1]],"nodes":[[8.0,49.0],[8.001,49.0]],"arcs":[[0,1]]}}'
+```
+
+The server loads the selected tuned model or best baseline, validates the saved
+feature-preprocessor schema, scores candidate arcs, and decodes the sequence
+with the shared Viterbi decoder. Estimator pipelines perform any
+model-specific scaling internally, matching their training configuration.
+Ground-truth labels are never returned, and successful requests and responses
+are logged in the terminal.
+
 ## Evaluate HMM route reconstruction
 
 The decoder uses directed `.arcs` connectivity and shortest-path network

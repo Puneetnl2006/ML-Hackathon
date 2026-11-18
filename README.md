@@ -1,6 +1,6 @@
 # PathSnap
 
-PathSnap is a map-matching and route-reconstruction project. Trip data is stored
+PathSnap matches GPS observations to candidate road arcs. Trip data is stored
 in `Train/` and `student_test/`, with one trip per subdirectory. Files are
 whitespace-delimited and headerless:
 
@@ -12,8 +12,7 @@ whitespace-delimited and headerless:
 
 ## Set up
 
-Use Python 3.12 or another version supported by the packages in
-`requirements.txt`.
+Use Python 3.12 or another version supported by `requirements.txt`.
 
 ```bash
 python -m venv .venv
@@ -52,11 +51,43 @@ python src/features.py \
 
 Feature extraction writes raw and training-scaled candidate features to
 `outputs/candidate_features.csv` and the fitted transformer to
-`outputs/feature_scaler.joblib`. Candidates are spatially matched to road arcs
-and include segment/center distance, heading alignment, speed, and
-acceleration (up to 10 nearest in-radius candidates per observation). The
-scaler is fitted exclusively on candidate rows from `Train/` and then applied
-to both partitions.
+`outputs/feature_scaler.joblib`. The scaler is fitted exclusively on candidate
+rows from `Train/` and then applied to both partitions. Candidate route
+membership is available for training trips only; student-test labels are not
+used.
+
+## Train and compare baseline models
+
+```bash
+python src/train_baselines.py \
+  --features-csv outputs/candidate_features.csv \
+  --output-dir outputs
+```
+
+The script compares logistic regression, random forest, histogram gradient
+boosting, k-nearest neighbors, and a linear support-vector machine. It uses
+five-fold `GroupKFold` cross-validation, keeping every trip in exactly one
+validation fold, then fits each model on training trips and scores the
+student-test candidates. Each model fit is capped at 250,000 candidate rows
+(50,000 for k-nearest neighbors) to keep the baseline run tractable; sampling
+preserves at least one row per training trip.
+
+Outputs include:
+
+- `model_comparison.csv`: out-of-fold metrics and student-test inference time.
+- `cross_validation_predictions.csv`: out-of-fold candidate predictions.
+- `student_test_predictions.csv`: candidate probabilities and each observation's
+  selected top candidate.
+- `confusion_matrices.csv` and `confusion_matrices.png`: out-of-fold
+  candidate-level confusion matrices.
+- One `.joblib` model per baseline, fitted on the training trips.
+
+Observation-level top-1 accuracy selects the highest-scored candidate for each
+observation and checks whether it belongs to that trip's labeled route.
+Macro-F1 and log loss are candidate-level metrics; candidate miss rate is the
+fraction of observations with no route candidate. The student-test route labels
+are withheld, so supervised metrics and confusion matrices are reported for
+out-of-fold training predictions only.
 
 ## GitHub Actions
 

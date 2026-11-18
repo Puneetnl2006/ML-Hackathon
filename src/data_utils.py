@@ -73,7 +73,9 @@ def read_numeric_file(
     return frame if preserve_row_index else frame.reset_index(drop=True)
 
 
-def load_trip(trip_dir: str | Path) -> dict[str, pd.DataFrame]:
+def load_trip(
+    trip_dir: str | Path, *, include_route: bool = True
+) -> dict[str, pd.DataFrame]:
     """Load available files from a trip folder using the documented column order."""
     trip_dir = Path(trip_dir)
     trip_id = trip_dir.name
@@ -130,8 +132,10 @@ def load_trip(trip_dir: str | Path) -> dict[str, pd.DataFrame]:
     else:
         arcs = pd.DataFrame(columns=["from_node", "to_node", "arc_id"])
 
-    route = read_numeric_file(
-        trip_dir / f"{trip_id}.route", 1, max_columns=1
+    route = (
+        read_numeric_file(trip_dir / f"{trip_id}.route", 1, max_columns=1)
+        if include_route
+        else pd.DataFrame()
     )
     if not route.empty:
         route.columns = ["arc_id"]

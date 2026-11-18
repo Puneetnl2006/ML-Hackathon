@@ -53,8 +53,8 @@ Feature extraction writes raw and training-scaled candidate features to
 `outputs/candidate_features.csv` and the fitted transformer to
 `outputs/feature_scaler.joblib`. The scaler is fitted exclusively on candidate
 rows from `Train/` and then applied to both partitions. Candidate route
-membership is available for training trips only; student-test labels are not
-used.
+membership is available for training trips only; student-test route files are
+not read during feature extraction or inference.
 
 ## Train and compare baseline models
 
@@ -153,3 +153,82 @@ The workflow in `.github/workflows/run_pipeline.yml` runs on every push and can
 also be started from the Actions tab with **Run workflow**. Download the
 `pathsnap-eda-and-features` artifact from a workflow run to inspect the CSV
 reports, fitted transformer, and interactive map.
+
+## Two-laptop deployment: FastAPI and evaluator UI
+
+The backend runs on Laptop 1 with the tuned classifier and reserved trips. The
+Streamlit evaluator runs on Laptop 2 and sends requests to Laptop 1 over the
+local network. The API reads only `.track`, `.nodes`, and `.arcs` for reserved
+trips; it does not load or return `.route` evaluation labels.
+
+### Prepare the serving classifier on Laptop 1
+
+Use the tuned classifier produced by the optimization workflow. For example,
+after running feature extraction, baseline comparison, and hyperparameter
+optimization as described above:
+
+```bash
+python src/prepare_artifacts.py \
+  --model outputs/<tuned-model-name>_tuned.joblib
+```
+
+This validates and copies the fitted classifier pipeline (including its
+preprocessing) to `outputs/pathsnap_artifacts/model.joblib`. Keep this artifact
+private to the backend machine; it is not served by an API route. The HMM
+settings are loaded from `config/hmm_decoder.json`.
+
+Install backend dependencies on Laptop 1:
+
+```bash
+python -m pip install -r requirements-api.txt
+```
+
+Start the API from the repository root:
+
+```bash
+PATHSNAP_DATA_DIR=student_test \
+  uvicorn src.app:app --host 0.0.0.0 --port 8000
+```
+
+The terminal reports startup readiness, each request's status and duration,
+and prediction counts. The backend exposes `GET /health`, `GET /trips`, and
+`POST /predict_route`. The prediction endpoint accepts either
+`{"trip_id":"00000000"}` or raw `observations`, `nodes`, and `arcs` arrays.
+Raw node and arc IDs may be omitted to use their array positions. A raw request
+uses GPS longitude/latitude pairs, optional sample times, node coordinates,
+and directed arcs referencing node IDs:
+
+```json
+{
+  "observations": [{"longitude": -73.98, "latitude": 40.75, "sample_time": 1}],
+  "nodes": [
+    {"node_id": 0, "longitude": -73.98, "latitude": 40.75},
+    {"node_id": 1, "longitude": -73.979, "latitude": 40.75}
+  ],
+  "arcs": [{"arc_id": 0, "from_node": 0, "to_node": 1}]
+}
+```
+
+### Start the evaluator on Laptop 2
+
+Install UI dependencies on Laptop 2:
+
+```bash
+python -m pip install -r requirements-ui.txt
+```
+
+Set Laptop 1's reachable local-network IP address and start Streamlit:
+
+```bash
+PATHSNAP_API_URL=http://<LAPTOP-1-LAN-IP>:8000 \
+  streamlit run src/ui.py --server.address 0.0.0.0 --server.port 8501
+```
+
+Open `http://<LAPTOP-2-LAN-IP>:8501` in the evaluator's browser, select one of
+the reserved trips, and choose **Predict route**. The map overlays GPS
+observations and the predicted road-segment sequence. No ground-truth route or
+accuracy metrics are sent to the UI.
+
+Allow TCP ports 8000 (Laptop 1) and 8501 (Laptop 2) only on the trusted local
+network. The demo API is intended for a trusted hackathon LAN; it does not
+include user authentication or TLS.

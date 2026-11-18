@@ -1,0 +1,11 @@
+{
+  "classifier_probability_weight": 5.0,
+  "disconnected_log_penalty": 1000.0,
+  "distance_sigma_meters": 30.0,
+  "heading_weight": 1.5,
+  "max_speed_mps": 60.0,
+  "max_spatial_gap_meters": 5000.0,
+  "max_time_gap_seconds": 300.0,
+  "max_transition_search_meters": 10000.0,
+  "transition_sigma_meters": 150.0
+}

@@ -13,9 +13,9 @@ import pandas as pd
 from scipy.spatial import cKDTree
 
 if __package__:
-    from .data_utils import discover_trip_dirs, load_trip
+    from .data_utils import discover_trip_dirs, load_trip, read_numeric_file
 else:
-    from data_utils import discover_trip_dirs, load_trip
+    from data_utils import discover_trip_dirs, load_trip, read_numeric_file
 
 LOGGER = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -107,6 +107,15 @@ def load_predicted_arc_ids(
     predictions_path = Path(predictions_path)
     if not predictions_path.is_file():
         raise FileNotFoundError(f"Prediction file not found: {predictions_path}")
+    if predictions_path.suffix.lower() == ".route":
+        route = read_numeric_file(predictions_path, 1, max_columns=1)
+        if route.empty:
+            return []
+        values = pd.to_numeric(route.iloc[:, 0], errors="coerce").dropna()
+        if not np.equal(values, np.floor(values)).all():
+            raise ValueError(f"Route arc IDs must be integers: {predictions_path}")
+        return values.astype("int64").tolist()
+
     predictions = pd.read_csv(predictions_path)
     if "trip_id" in predictions.columns:
         trip_ids = predictions["trip_id"].astype(str)
@@ -194,6 +203,7 @@ def create_trip_map(
     predictions_path: str | Path | None = None,
     model: str | None = None,
     road_buffer_meters: float = 50,
+    hmm_predictions_path: str | Path | None = None,
 ) -> Path:
     """Create and save an interactive map for a trip.
 
@@ -208,19 +218,35 @@ def create_trip_map(
     if track.empty:
         raise ValueError(f"Cannot map trip without GPS observations: {trip_dir}")
 
-    predicted_arc_ids = (
-        load_predicted_arc_ids(predictions_path, trip_dir.name, model)
-        if predictions_path is not None
-        else []
-    )
-    unknown_prediction_ids = set(predicted_arc_ids) - set(
-        trip["arcs"]["arc_id"].astype(int)
-    )
-    if unknown_prediction_ids:
-        raise ValueError(
-            f"Predicted arc IDs are not present in {trip_dir}: "
-            f"{sorted(unknown_prediction_ids)[:10]}"
+    prediction_sources = [
+        (
+            "Classifier-predicted route",
+            predictions_path,
+            "#f97316",
+            model,
+        ),
+        (
+            "HMM-decoded route",
+            hmm_predictions_path,
+            "#2563eb",
+            None,
+        ),
+    ]
+    valid_arc_ids = set(trip["arcs"]["arc_id"].astype(int))
+    predicted_routes: list[tuple[str, list[int], str]] = []
+    for route_name, route_path, color, route_model in prediction_sources:
+        if route_path is None:
+            continue
+        route_arc_ids = load_predicted_arc_ids(
+            route_path, trip_dir.name, route_model
         )
+        unknown_ids = set(route_arc_ids) - valid_arc_ids
+        if unknown_ids:
+            raise ValueError(
+                f"{route_name} contains arc IDs not present in {trip_dir}: "
+                f"{sorted(unknown_ids)[:10]}"
+            )
+        predicted_routes.append((route_name, route_arc_ids, color))
     relevant_arc_ids = _relevant_arc_ids(trip, road_buffer_meters)
     track_points = track[["latitude", "longitude"]].to_numpy(dtype=float).tolist()
     center = [
@@ -326,22 +352,24 @@ def create_trip_map(
         )
         legend_entries.append(("Reference route", "#16a34a"))
 
-    predicted_geometries = _arc_geometries(trip, predicted_arc_ids)
-    if predicted_geometries:
-        predicted_layer = folium.FeatureGroup(name="Predicted route", show=True)
-        for geometry in predicted_geometries:
+    for route_name, route_arc_ids, color in predicted_routes:
+        route_geometries = _arc_geometries(trip, route_arc_ids)
+        if not route_geometries:
+            continue
+        predicted_layer = folium.FeatureGroup(name=route_name, show=True)
+        for geometry in route_geometries:
             folium.PolyLine(
                 geometry,
-                color="#f97316",
+                color=color,
                 weight=5,
                 opacity=0.9,
-                tooltip="Predicted route",
+                tooltip=route_name,
             ).add_to(predicted_layer)
         predicted_layer.add_to(map_view)
         fit_points.extend(
-            point for geometry in predicted_geometries for point in geometry
+            point for geometry in route_geometries for point in geometry
         )
-        legend_entries.append(("Predicted route", "#f97316"))
+        legend_entries.append((route_name, color))
 
     latitudes, longitudes = zip(*fit_points)
     map_view.fit_bounds(
@@ -366,13 +394,18 @@ def generate_sample_maps(
     trip_id: str | None = None,
     predictions_path: str | Path | None = None,
     model: str | None = None,
-    max_maps: int = 1,
+    max_maps: int = 2,
+    hmm_predictions_path: str | Path | None = None,
 ) -> list[Path]:
-    """Discover trips under a workspace and generate up to ``max_maps`` maps."""
+    """Map a sample from each data partition, then fill up to ``max_maps``."""
     workspace = Path(workspace).resolve()
     if max_maps < 1:
         raise ValueError("max_maps must be at least 1.")
-    trip_dirs = discover_trip_dirs(workspace)
+    trip_dirs = [
+        trip_dir
+        for trip_dir in discover_trip_dirs(workspace)
+        if (trip_dir / f"{trip_dir.name}.track").is_file()
+    ]
     if trip_id is not None:
         trip_dirs = [trip_dir for trip_dir in trip_dirs if trip_dir.name == trip_id]
         if not trip_dirs:
@@ -380,7 +413,25 @@ def generate_sample_maps(
     if not trip_dirs:
         raise FileNotFoundError(f"No PathSnap trip files were found under {workspace}.")
 
-    output_dir = Path(output_dir) if output_dir is not None else workspace / "outputs" / "maps"
+    sampled_dirs = []
+    seen_datasets = set()
+    for trip_dir in trip_dirs:
+        if trip_id is not None or trip_dir.parent not in seen_datasets:
+            sampled_dirs.append(trip_dir)
+            seen_datasets.add(trip_dir.parent)
+    if len(sampled_dirs) < max_maps:
+        sampled_set = set(sampled_dirs)
+        sampled_dirs.extend(
+            trip_dir
+            for trip_dir in trip_dirs
+            if trip_dir not in sampled_set and len(sampled_dirs) < max_maps
+        )
+
+    output_dir = (
+        Path(output_dir)
+        if output_dir is not None
+        else workspace / "outputs" / "maps"
+    )
     if not output_dir.is_absolute():
         output_dir = workspace / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -390,9 +441,13 @@ def generate_sample_maps(
         predictions_path = default_predictions if default_predictions.is_file() else None
     elif not Path(predictions_path).is_absolute():
         predictions_path = workspace / predictions_path
+    if hmm_predictions_path is not None and not Path(
+        hmm_predictions_path
+    ).is_absolute():
+        hmm_predictions_path = workspace / hmm_predictions_path
 
     generated = []
-    for trip_dir in trip_dirs[:max_maps]:
+    for trip_dir in sampled_dirs[:max_maps]:
         dataset_name = trip_dir.parent.name
         output_path = output_dir / f"{dataset_name}_{trip_dir.name}_map.html"
         generated.append(
@@ -401,6 +456,7 @@ def generate_sample_maps(
                 output_path,
                 predictions_path=predictions_path,
                 model=model,
+                hmm_predictions_path=hmm_predictions_path,
             )
         )
         LOGGER.info("Wrote interactive map: %s", output_path)
@@ -425,13 +481,20 @@ def main() -> None:
     parser.add_argument(
         "--max-maps",
         type=int,
-        default=1,
-        help="Maximum number of discovered maps to generate (default: 1).",
+        default=2,
+        help="Maximum number of discovered maps to generate (default: 2).",
     )
     parser.add_argument(
         "--predictions",
+        "--classifier-predictions",
+        dest="predictions",
         type=Path,
-        help="Optional classifier or decoded-route prediction CSV.",
+        help="Optional classifier prediction CSV.",
+    )
+    parser.add_argument(
+        "--hmm-predictions",
+        type=Path,
+        help="Optional HMM-decoded route CSV or .route file.",
     )
     parser.add_argument(
         "--model",
@@ -446,6 +509,7 @@ def main() -> None:
         predictions_path=args.predictions,
         model=args.model,
         max_maps=args.max_maps,
+        hmm_predictions_path=args.hmm_predictions,
     )
     print("\n".join(str(path) for path in paths))
 

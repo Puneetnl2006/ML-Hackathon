@@ -40,7 +40,8 @@ first available trip to `eda_outputs/`; select another trip with
 
 ## Generate route comparison maps
 
-Generate a map for the first trip discovered beneath the repository root:
+Generate sample maps for the first training trip and first student-testing trip
+discovered beneath the repository root:
 
 ```bash
 python src/visualize.py
@@ -56,20 +57,24 @@ python src/visualize.py --max-maps 5
 ```
 
 Maps include toggleable layers for GPS observations, nearby road nodes and
-arcs, and the reference route when available. To overlay classifier or decoded
-route predictions from a CSV, provide its path and, when needed, the model:
+arcs, the reference route when available, and separate classifier and HMM
+prediction layers when their outputs are provided:
 
 ```bash
 python src/visualize.py \
   --trip-id 00000007 \
-  --predictions outputs/student_test_predictions.csv \
-  --model random_forest
+  --classifier-predictions outputs/student_test_predictions.csv \
+  --model random_forest \
+  --hmm-predictions outputs/hmm_decoded_routes.csv
 ```
 
 Classifier CSVs can use the `selected_top1` and `model` columns produced by
-`src/train_baselines.py`. Decoded-route CSVs can provide predicted arc IDs in
-`predicted_arc_id`, `decoded_arc_id`, `route_arc_id`, or `arc_id`. The HTML maps
-can be opened in a browser for visual inspection or technical-report screenshots.
+`src/train_baselines.py`. HMM CSVs can provide predicted arc IDs in
+`predicted_arc_id`, `decoded_arc_id`, `route_arc_id`, or `arc_id`; a plain
+whitespace-delimited `.route` file is also accepted. Use `--max-maps` to set the
+maximum number of sample maps (default: two, one per dataset partition). The
+HTML maps can be opened in a browser for visual inspection or technical-report
+screenshots.
 
 ## Build candidate features
 

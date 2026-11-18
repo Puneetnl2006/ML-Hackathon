@@ -113,6 +113,31 @@ for model selection or optimization. Outputs include
 `optimization_best_params.json`. Increase `--n-trials` for a broader search;
 `--cv-splits` controls the number of GroupKFold folds.
 
+## Run the FastAPI inference server
+
+After generating `outputs/feature_scaler.joblib` and a tuned or baseline
+`.joblib` model, start the server from the repository root:
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+The `/predict_route` endpoint accepts either a dataset trip ID or an unsigned
+raw trip payload:
+
+```bash
+curl -X POST http://localhost:8000/predict_route \
+  -H "Content-Type: application/json" \
+  -d '{"trip_id":"00000000"}'
+```
+
+For raw inference, send `track`, `nodes`, and `arcs` arrays. The server loads
+the selected tuned model or best baseline and saved preprocessing artifact, and
+decodes the candidate sequence with `outputs/hmm_decoder.joblib`
+when present. It falls back to a conservative Viterbi decoder if no saved HMM
+artifact is available. Route labels are never returned or written to the
+response, and successful requests are logged in the terminal.
+
 ## GitHub Actions
 
 The workflow in `.github/workflows/run_pipeline.yml` runs on every push and can

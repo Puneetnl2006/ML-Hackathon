@@ -58,6 +58,40 @@ acceleration (up to 10 nearest in-radius candidates per observation). The
 scaler is fitted exclusively on candidate rows from `Train/` and then applied
 to both partitions.
 
+## Evaluate HMM route reconstruction
+
+The decoder uses directed `.arcs` connectivity and shortest-path network
+distances to find a likely candidate-arc sequence with Viterbi. Missing
+candidates and large time or spatial gaps split a track into independent
+decoding runs. Disconnected transitions receive a strong penalty rather than
+causing decoding to fail.
+
+Generate candidate features, fit the evaluation classifier on training trips,
+and compare independent top-1 predictions with HMM decoding:
+
+```bash
+python src/features.py \
+  --train-dir Train \
+  --test-dir student_test \
+  --output-dir outputs
+python src/evaluate_decoder.py \
+  --candidate-features outputs/candidate_features.csv \
+  --train-dir Train \
+  --test-dir student_test \
+  --output-dir decoder_outputs
+```
+
+The evaluation holds out complete `Train/` trips (20% by default) and fits a
+logistic-regression candidate classifier on the remaining trips. Accuracy is
+the fraction of selected arcs that appear in the held-out trip's `.route`;
+`student_test/` has no route labels, so only its route-continuity results are
+available. `decoder_outputs/decoder_metrics.csv` contains per-trip and
+aggregate pointwise accuracy, route continuity, and invalid-transition counts.
+`decoder_outputs/decoder_visualization.csv` contains GPS points, both predicted
+arc IDs and geometries, and route-membership labels for mapping or plotting.
+Use `--validation-fraction` and `--seed` to control the trip-level validation
+split.
+
 ## GitHub Actions
 
 The workflow in `.github/workflows/run_pipeline.yml` runs on every push and can

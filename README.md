@@ -39,9 +39,28 @@ statistics, and dataset totals to `outputs/dataset_inventory.csv` and
 first available trip to `eda_outputs/`; select another trip with
 `--sample-trip TRIP_ID`.
 
+## Build candidate features
+
+After exploring the datasets, extract candidate-road features with:
+
+```bash
+python src/features.py \
+  --train-dir Train \
+  --test-dir student_test \
+  --output-dir outputs
+```
+
+Feature extraction writes raw and training-scaled candidate features to
+`outputs/candidate_features.csv` and the fitted transformer to
+`outputs/feature_scaler.joblib`. Candidates are spatially matched to road arcs
+and include segment/center distance, heading alignment, speed, and
+acceleration (up to 10 nearest in-radius candidates per observation). The
+scaler is fitted exclusively on candidate rows from `Train/` and then applied
+to both partitions.
+
 ## GitHub Actions
 
 The workflow in `.github/workflows/run_pipeline.yml` runs on every push and can
 also be started from the Actions tab with **Run workflow**. Download the
-`pathsnap-eda` artifact from a workflow run to inspect the CSV reports and
-interactive map.
+`pathsnap-eda-and-features` artifact from a workflow run to inspect the CSV
+reports, fitted transformer, and interactive map.

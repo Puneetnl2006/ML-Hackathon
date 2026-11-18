@@ -33,12 +33,20 @@ jobs:
           --output-dir outputs
           --map-output-dir eda_outputs
 
-      - name: Upload EDA outputs
+      - name: Extract candidate features
+        run: >-
+          python src/features.py
+          --train-dir Train
+          --test-dir student_test
+          --output-dir outputs
+
+      - name: Upload pipeline outputs
         uses: actions/upload-artifact@v4
         with:
-          name: pathsnap-eda
+          name: pathsnap-eda-and-features
           path: |
             outputs/*.csv
+            outputs/*.joblib
             eda_outputs/*.html
           if-no-files-found: error
           retention-days: 14

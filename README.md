@@ -38,6 +38,39 @@ statistics, and dataset totals to `outputs/dataset_inventory.csv` and
 first available trip to `eda_outputs/`; select another trip with
 `--sample-trip TRIP_ID`.
 
+## Generate route comparison maps
+
+Generate a map for the first trip discovered beneath the repository root:
+
+```bash
+python src/visualize.py
+```
+
+The script scans the workspace for PathSnap trip files and saves interactive
+maps under `outputs/maps/`. Select a particular trip or generate more samples
+with:
+
+```bash
+python src/visualize.py --trip-id 00000001
+python src/visualize.py --max-maps 5
+```
+
+Maps include toggleable layers for GPS observations, nearby road nodes and
+arcs, and the reference route when available. To overlay classifier or decoded
+route predictions from a CSV, provide its path and, when needed, the model:
+
+```bash
+python src/visualize.py \
+  --trip-id 00000007 \
+  --predictions outputs/student_test_predictions.csv \
+  --model random_forest
+```
+
+Classifier CSVs can use the `selected_top1` and `model` columns produced by
+`src/train_baselines.py`. Decoded-route CSVs can provide predicted arc IDs in
+`predicted_arc_id`, `decoded_arc_id`, `route_arc_id`, or `arc_id`. The HTML maps
+can be opened in a browser for visual inspection or technical-report screenshots.
+
 ## Build candidate features
 
 After exploring the datasets, extract candidate-road features with:

@@ -156,10 +156,11 @@ reports, fitted transformer, and interactive map.
 
 ## Two-laptop deployment: FastAPI and evaluator UI
 
-The backend runs on Laptop 1 with the tuned classifier and reserved trips. The
-Streamlit evaluator runs on Laptop 2 and sends requests to Laptop 1 over the
-local network. The API reads only `.track`, `.nodes`, and `.arcs` for reserved
-trips; it does not load or return `.route` evaluation labels.
+The backend runs on Laptop 1 with the serving classifier and reserved trips.
+The Streamlit evaluator runs on Laptop 2 and sends requests to Laptop 1. The
+API reads only `.track`, `.nodes`, and `.arcs` for reserved trips; it does not
+load or return `.route` evaluation labels. When `PATHSNAP_API_TOKEN` is set,
+the `/trips` and `/predict_route` endpoints require the same bearer token.
 
 ### Prepare the serving classifier on Laptop 1
 
@@ -186,9 +187,26 @@ python -m pip install -r requirements-api.txt
 Start the API from the repository root:
 
 ```bash
-PATHSNAP_DATA_DIR=student_test \
-  uvicorn src.app:app --host 0.0.0.0 --port 8000
+export PATHSNAP_API_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+printf 'Copy this token securely to Laptop 2: %s\n' "$PATHSNAP_API_TOKEN"
+export PATHSNAP_DATA_DIR=student_test
+uvicorn src.app:app --host 0.0.0.0 --port 8000
 ```
+
+Copy the token securely to Laptop 2. Keep it set on Laptop 1 for the life of
+the API process. The public `/health` endpoint can be used without a token.
+For a GitHub Codespace backend, make port 8000 reachable from Laptop 2:
+
+```bash
+gh codespace ports visibility 8000:public -c "$CODESPACE_NAME"
+```
+
+The Codespaces API address is
+`https://<CODESPACE-NAME>-8000.app.github.dev`. The trip-list and prediction
+endpoints require the bearer token; `/health` remains public for availability
+checks. Do not share the token or commit it to the repository. If both
+computers are on the same trusted LAN and Laptop 1 is not a Codespace, use
+Laptop 1's LAN IP instead and allow TCP port 8000 only on that network.
 
 The terminal reports startup readiness, each request's status and duration,
 and prediction counts. The backend exposes `GET /health`, `GET /trips`, and
@@ -220,15 +238,18 @@ python -m pip install -r requirements-ui.txt
 Set Laptop 1's reachable local-network IP address and start Streamlit:
 
 ```bash
-PATHSNAP_API_URL=http://<LAPTOP-1-LAN-IP>:8000 \
-  streamlit run src/ui.py --server.address 0.0.0.0 --server.port 8501
+export PATHSNAP_API_URL=https://<CODESPACE-NAME>-8000.app.github.dev
+export PATHSNAP_API_TOKEN='<copy the same token from Laptop 1>'
+streamlit run src/ui.py --server.address 0.0.0.0 --server.port 8501
 ```
 
-Open `http://<LAPTOP-2-LAN-IP>:8501` in the evaluator's browser, select one of
-the reserved trips, and choose **Predict route**. The map overlays GPS
-observations and the predicted road-segment sequence. No ground-truth route or
-accuracy metrics are sent to the UI.
+For a backend running directly on the trusted LAN, set
+`PATHSNAP_API_URL=http://<LAPTOP-1-LAN-IP>:8000` instead. Open
+`http://<LAPTOP-2-LAN-IP>:8501` in the evaluator's browser and select a
+reserved trip. Its prediction and map load automatically, with GPS observations
+overlaid on the predicted road-segment sequence. The map uses Esri World Street
+Map tiles rather than OpenStreetMap's volunteer-run tile servers. No ground-truth
+route or accuracy metrics are sent to the UI.
 
 Allow TCP ports 8000 (Laptop 1) and 8501 (Laptop 2) only on the trusted local
-network. The demo API is intended for a trusted hackathon LAN; it does not
-include user authentication or TLS.
+network when using the LAN setup.

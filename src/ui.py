@@ -14,8 +14,9 @@ REQUEST_TIMEOUT_SECONDS = 120
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def get_reserved_trips(api_url: str) -> list[str]:
-    response = requests.get(f"{api_url}/trips", timeout=10)
+def get_reserved_trips(api_url: str, _api_token: str) -> list[str]:
+    headers = {"Authorization": f"Bearer {_api_token}"} if _api_token else {}
+    response = requests.get(f"{api_url}/trips", headers=headers, timeout=10)
     response.raise_for_status()
     trip_ids = response.json()
     if not isinstance(trip_ids, list) or not all(
@@ -23,6 +24,23 @@ def get_reserved_trips(api_url: str) -> list[str]:
     ):
         raise ValueError("The route API returned an invalid trip list.")
     return trip_ids
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_route_prediction(api_url: str, trip_id: str, _api_token: str) -> dict:
+    """Fetch and cache a route prediction for the selected trip."""
+    headers = {"Authorization": f"Bearer {_api_token}"} if _api_token else {}
+    response = requests.post(
+        f"{api_url}/predict_route",
+        json={"trip_id": trip_id},
+        headers=headers,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not isinstance(result, dict):
+        raise ValueError("The route API returned an invalid prediction.")
+    return result
 
 
 def build_route_map(result: dict) -> folium.Map:
@@ -44,7 +62,12 @@ def build_route_map(result: dict) -> folium.Map:
         sum(point[0] for point in gps_points) / len(gps_points),
         sum(point[1] for point in gps_points) / len(gps_points),
     ]
-    route_map = folium.Map(location=center, zoom_start=13, control_scale=True)
+    route_map = folium.Map(
+        location=center,
+        zoom_start=13,
+        control_scale=True,
+        tiles="Esri.WorldStreetMap",
+    )
     folium.PolyLine(
         gps_points,
         color="#247ba0",
@@ -75,12 +98,13 @@ def main() -> None:
     st.set_page_config(page_title="PathSnap Evaluator", page_icon="🗺️", layout="wide")
     st.title("PathSnap Route Evaluator")
     st.caption(
-        "Select a reserved evaluation trip to request a map-matched route from the backend."
+        "Select a reserved evaluation trip to load its map-matched route."
     )
     api_url = os.environ.get("PATHSNAP_API_URL", DEFAULT_API_URL).rstrip("/")
+    api_token = os.environ.get("PATHSNAP_API_TOKEN", "")
 
     try:
-        trip_ids = get_reserved_trips(api_url)
+        trip_ids = get_reserved_trips(api_url, api_token)
     except (requests.RequestException, ValueError) as error:
         st.error(
             f"Could not load trips from {api_url}. Check the backend address and "
@@ -92,47 +116,40 @@ def main() -> None:
         st.stop()
 
     trip_id = st.selectbox("Reserved evaluation trip", trip_ids)
-    if st.button("Predict route", type="primary"):
-        with st.spinner(f"Matching trip {trip_id}..."):
-            try:
-                response = requests.post(
-                    f"{api_url}/predict_route",
-                    json={"trip_id": trip_id},
-                    timeout=REQUEST_TIMEOUT_SECONDS,
-                )
-                response.raise_for_status()
-                result = response.json()
-            except requests.RequestException as error:
-                st.error(f"Route prediction request failed: {error}")
-                st.stop()
-            except ValueError as error:
-                st.error(f"The backend returned invalid JSON: {error}")
-                st.stop()
+    with st.spinner(f"Matching trip {trip_id}..."):
+        try:
+            result = get_route_prediction(api_url, trip_id, api_token)
+        except requests.RequestException as error:
+            st.error(f"Route prediction request failed: {error}")
+            st.stop()
+        except ValueError as error:
+            st.error(f"The backend returned invalid JSON: {error}")
+            st.stop()
 
-        st.success(f"Route prediction completed for trip {result['trip_id']}.")
-        metric_columns = st.columns(2)
-        metric_columns[0].metric("GPS observations", result["observation_count"])
-        metric_columns[1].metric(
-            "Matched observations", result["matched_observation_count"]
+    st.success(f"Route prediction completed for trip {result['trip_id']}.")
+    metric_columns = st.columns(2)
+    metric_columns[0].metric("GPS observations", result["observation_count"])
+    metric_columns[1].metric(
+        "Matched observations", result["matched_observation_count"]
+    )
+    st_folium(
+        build_route_map(result),
+        height=620,
+        width=1200,
+        returned_objects=[],
+    )
+    with st.expander("Predicted road-segment sequence"):
+        st.dataframe(
+            [
+                {
+                    "observation": point["observation_index"],
+                    "road segment": point["arc_id"],
+                }
+                for point in result["observations"]
+            ],
+            width="stretch",
+            hide_index=True,
         )
-        st_folium(
-            build_route_map(result),
-            height=620,
-            use_container_width=True,
-            returned_objects=[],
-        )
-        with st.expander("Predicted road-segment sequence"):
-            st.dataframe(
-                [
-                    {
-                        "observation": point["observation_index"],
-                        "road segment": point["arc_id"],
-                    }
-                    for point in result["observations"]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 if __package__:
@@ -29,6 +31,17 @@ LOGGER = logging.getLogger("pathsnap.api")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MAX_OBSERVATIONS = 10_000
 MAX_NETWORK_ROWS = 100_000
+
+
+def _has_valid_bearer_token(expected_token: str, authorization: str) -> bool:
+    scheme, separator, supplied_token = authorization.partition(" ")
+    return bool(
+        separator
+        and scheme.lower() == "bearer"
+        and hmac.compare_digest(
+            supplied_token.encode("utf-8"), expected_token.encode("utf-8")
+        )
+    )
 
 
 class GPSObservation(BaseModel):
@@ -254,6 +267,10 @@ class RoutePredictor:
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    if not os.environ.get("PATHSNAP_API_TOKEN"):
+        LOGGER.warning(
+            "PATHSNAP_API_TOKEN is unset; API endpoints are unauthenticated."
+        )
     model_path = Path(
         os.environ.get(
             "PATHSNAP_MODEL_PATH",
@@ -295,7 +312,19 @@ app = FastAPI(
 async def log_request_metrics(request: Request, call_next):
     started = time.perf_counter()
     try:
-        response = await call_next(request)
+        expected_token = os.environ.get("PATHSNAP_API_TOKEN")
+        authorization = request.headers.get("authorization", "")
+        if (
+            expected_token
+            and request.url.path != "/health"
+            and not _has_valid_bearer_token(expected_token, authorization)
+        ):
+            response = JSONResponse(
+                status_code=401,
+                content={"detail": "A valid bearer token is required."},
+            )
+        else:
+            response = await call_next(request)
     except Exception:
         LOGGER.exception(
             "Request failed: %s %s (%.1f ms)",

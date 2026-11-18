@@ -7,7 +7,11 @@ import unittest
 import numpy as np
 from pydantic import ValidationError
 
-from src.app import PredictRouteRequest, RoutePredictor
+from src.app import (
+    PredictRouteRequest,
+    RoutePredictor,
+    _has_valid_bearer_token,
+)
 
 
 class FixedProbabilityModel:
@@ -52,6 +56,12 @@ class RouteApiTests(unittest.TestCase):
                 trip_id="00000000",
                 observations=[{"longitude": 0.0, "latitude": 0.0}],
             )
+
+    def test_bearer_token_is_required_when_configured(self) -> None:
+        self.assertTrue(_has_valid_bearer_token("demo-secret", "Bearer demo-secret"))
+        self.assertFalse(_has_valid_bearer_token("demo-secret", "Bearer wrong"))
+        self.assertFalse(_has_valid_bearer_token("demo-secret", "demo-secret"))
+        self.assertFalse(_has_valid_bearer_token("demo-secret", "Bearer wrong-🔒"))
 
 
 if __name__ == "__main__":

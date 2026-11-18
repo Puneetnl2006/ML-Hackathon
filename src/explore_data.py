@@ -113,7 +113,12 @@ def create_trip_map(
         raise ValueError(f"Cannot map trip without GPS observations: {trip_dir}")
 
     center = [float(track["latitude"].mean()), float(track["longitude"].mean())]
-    map_view = folium.Map(location=center, zoom_start=14, control_scale=True)
+    map_view = folium.Map(
+        location=center,
+        zoom_start=14,
+        control_scale=True,
+        tiles="Esri.WorldStreetMap",
+    )
     if not nodes.empty and not arcs.empty:
         arc_pairs = arcs[["from_node", "to_node"]].to_numpy(dtype=np.int64)
         node_coordinates = {

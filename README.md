@@ -1,9 +1,14 @@
 # PathSnap
 
-PathSnap matches GPS observations to candidate road arcs. The repository
-contains 80 labeled trips in `Train/` and 10 held-out trips in `student_test/`.
-Each trip directory contains headerless, whitespace-delimited `.track`,
-`.nodes`, `.arcs`, and `.route` files.
+PathSnap matches GPS observations to candidate road arcs. Trip data is stored
+in `Train/` and `student_test/`, with one trip per subdirectory. Files are
+whitespace-delimited and headerless:
+
+- `.track`: longitude, latitude, and sample time/index (two-column tracks are
+  also accepted; row order is used as the sample time).
+- `.nodes`: longitude and latitude.
+- `.arcs`: zero-based start-node and end-node indices.
+- `.route`: ordered arc-row indices.
 
 ## Set up
 
@@ -15,7 +20,27 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-## Extract candidate features
+## Explore the datasets
+
+From the repository root:
+
+```bash
+python src/explore_data.py \
+  --train-dir Train \
+  --test-dir student_test \
+  --output-dir outputs \
+  --map-output-dir eda_outputs
+```
+
+The script writes per-trip file sizes, observation counts, sampling interval
+statistics, and dataset totals to `outputs/dataset_inventory.csv` and
+`outputs/dataset_summary.csv`. It also saves an interactive Folium map of the
+first available trip to `eda_outputs/`; select another trip with
+`--sample-trip TRIP_ID`.
+
+## Build candidate features
+
+After exploring the datasets, extract candidate-road features with:
 
 ```bash
 python src/features.py \
@@ -24,8 +49,12 @@ python src/features.py \
   --output-dir outputs
 ```
 
-This writes `outputs/candidate_features.csv`. Candidate route membership is
-available for training trips only; student-test labels are not used.
+Feature extraction writes raw and training-scaled candidate features to
+`outputs/candidate_features.csv` and the fitted transformer to
+`outputs/feature_scaler.joblib`. The scaler is fitted exclusively on candidate
+rows from `Train/` and then applied to both partitions. Candidate route
+membership is available for training trips only; student-test labels are not
+used.
 
 ## Train and compare baseline models
 
@@ -59,3 +88,10 @@ Macro-F1 and log loss are candidate-level metrics; candidate miss rate is the
 fraction of observations with no route candidate. The student-test route labels
 are withheld, so supervised metrics and confusion matrices are reported for
 out-of-fold training predictions only.
+
+## GitHub Actions
+
+The workflow in `.github/workflows/run_pipeline.yml` runs on every push and can
+also be started from the Actions tab with **Run workflow**. Download the
+`pathsnap-eda-and-features` artifact from a workflow run to inspect the CSV
+reports, fitted transformer, and interactive map.

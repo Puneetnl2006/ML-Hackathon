@@ -38,6 +38,44 @@ statistics, and dataset totals to `outputs/dataset_inventory.csv` and
 first available trip to `eda_outputs/`; select another trip with
 `--sample-trip TRIP_ID`.
 
+## Generate route comparison maps
+
+Generate sample maps for the first training trip and first student-testing trip
+discovered beneath the repository root:
+
+```bash
+python src/visualize.py
+```
+
+The script scans the workspace for PathSnap trip files and saves interactive
+maps under `outputs/maps/`. Select a particular trip or generate more samples
+with:
+
+```bash
+python src/visualize.py --trip-id 00000001
+python src/visualize.py --max-maps 5
+```
+
+Maps include toggleable layers for GPS observations, nearby road nodes and
+arcs, the reference route when available, and separate classifier and HMM
+prediction layers when their outputs are provided:
+
+```bash
+python src/visualize.py \
+  --trip-id 00000007 \
+  --classifier-predictions outputs/student_test_predictions.csv \
+  --model random_forest \
+  --hmm-predictions outputs/hmm_decoded_routes.csv
+```
+
+Classifier CSVs can use the `selected_top1` and `model` columns produced by
+`src/train_baselines.py`. HMM CSVs can provide predicted arc IDs in
+`predicted_arc_id`, `decoded_arc_id`, `route_arc_id`, or `arc_id`; a plain
+whitespace-delimited `.route` file is also accepted. Use `--max-maps` to set the
+maximum number of sample maps (default: two, one per dataset partition). The
+HTML maps can be opened in a browser for visual inspection or technical-report
+screenshots.
+
 ## Build candidate features
 
 After exploring the datasets, extract candidate-road features with:
@@ -122,6 +160,8 @@ After generating `outputs/feature_scaler.joblib` and a tuned or baseline
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
+Check server availability with `GET /health`.
+
 The `/predict_route` endpoint accepts either a dataset trip ID or an unsigned
 raw trip payload:
 
@@ -131,12 +171,54 @@ curl -X POST http://localhost:8000/predict_route \
   -d '{"trip_id":"00000000"}'
 ```
 
-For raw inference, send `track`, `nodes`, and `arcs` arrays. The server loads
-the selected tuned model or best baseline and saved preprocessing artifact, and
-decodes the candidate sequence with `outputs/hmm_decoder.joblib`
-when present. It falls back to a conservative Viterbi decoder if no saved HMM
-artifact is available. Route labels are never returned or written to the
-response, and successful requests are logged in the terminal.
+For raw inference, include `track`, `nodes`, and `arcs` arrays under `trip`:
+
+```bash
+curl -X POST http://localhost:8000/predict_route \
+  -H "Content-Type: application/json" \
+  -d '{"trip":{"track":[[8.0,49.0,1]],"nodes":[[8.0,49.0],[8.001,49.0]],"arcs":[[0,1]]}}'
+```
+
+The server loads the selected tuned model or best baseline, validates the saved
+feature-preprocessor schema, scores candidate arcs, and decodes the sequence
+with the shared Viterbi decoder. Estimator pipelines perform any
+model-specific scaling internally, matching their training configuration.
+Ground-truth labels are never returned, and successful requests and responses
+are logged in the terminal.
+
+## Evaluate HMM route reconstruction
+
+The decoder uses directed `.arcs` connectivity and shortest-path network
+distances to find a likely candidate-arc sequence with Viterbi. Missing
+candidates and large time or spatial gaps split a track into independent
+decoding runs. Disconnected transitions receive a strong penalty rather than
+causing decoding to fail.
+
+Generate candidate features, fit the evaluation classifier on training trips,
+and compare independent top-1 predictions with HMM decoding:
+
+```bash
+python src/features.py \
+  --train-dir Train \
+  --test-dir student_test \
+  --output-dir outputs
+python src/evaluate_decoder.py \
+  --candidate-features outputs/candidate_features.csv \
+  --train-dir Train \
+  --test-dir student_test \
+  --output-dir decoder_outputs
+```
+
+The evaluation holds out complete `Train/` trips (20% by default) and fits a
+logistic-regression candidate classifier on the remaining trips. Accuracy is
+the fraction of selected arcs that appear in the held-out trip's `.route`;
+`student_test/` has no route labels, so only its route-continuity results are
+available. `decoder_outputs/decoder_metrics.csv` contains per-trip and
+aggregate pointwise accuracy, route continuity, and invalid-transition counts.
+`decoder_outputs/decoder_visualization.csv` contains GPS points, both predicted
+arc IDs and geometries, and route-membership labels for mapping or plotting.
+Use `--validation-fraction` and `--seed` to control the trip-level validation
+split.
 
 ## GitHub Actions
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import re
 import tempfile
 from pathlib import Path
@@ -10,23 +12,60 @@ from pathlib import Path
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.data_utils import load_trip
+from src.decoder import ViterbiDecoder
 from src.features import extract_trip_features
-from src.inference import model_probabilities, viterbi_route
+from src.inference import model_probabilities, validate_feature_preprocessor
+from src.train_baselines import build_models
 
 LOGGER = logging.getLogger("pathsnap.api")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 TRIP_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SUPPORTED_MODELS = frozenset(build_models())
 
 
 class RawTripPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    track: list[list[float]] = Field(..., min_length=1)
-    nodes: list[list[float]] = Field(..., min_length=1)
-    arcs: list[list[int]] = Field(..., min_length=1)
+    track: list[list[float]] = Field(..., min_length=1, max_length=100_000)
+    nodes: list[list[float]] = Field(..., min_length=1, max_length=250_000)
+    arcs: list[list[int]] = Field(..., min_length=1, max_length=500_000)
+
+    @model_validator(mode="after")
+    def validate_trip_geometry(self) -> RawTripPayload:
+        track_widths = {len(row) for row in self.track}
+        if not track_widths.issubset({2, 3}) or len(track_widths) != 1:
+            raise ValueError("Each track row must contain longitude, latitude, and optional time.")
+        if any(len(row) != 2 for row in self.nodes):
+            raise ValueError("Each node row must contain longitude and latitude.")
+        if any(len(row) != 2 for row in self.arcs):
+            raise ValueError("Each arc row must contain start and end node indices.")
+
+        for label, coordinates in (
+            ("track", self.track),
+            ("nodes", self.nodes),
+        ):
+            for row in coordinates:
+                longitude, latitude = row[:2]
+                if (
+                    not math.isfinite(longitude)
+                    or not math.isfinite(latitude)
+                    or not -180 <= longitude <= 180
+                    or not -90 <= latitude <= 90
+                    or any(not math.isfinite(value) for value in row[2:])
+                ):
+                    raise ValueError(f"{label} coordinates must be finite and in range.")
+
+        node_count = len(self.nodes)
+        if any(
+            start < 0 or end < 0 or start >= node_count or end >= node_count
+            for start, end in self.arcs
+        ):
+            raise ValueError("Arc endpoints must reference nodes in the payload.")
+        return self
 
 
 class PredictionRequest(BaseModel):
@@ -35,13 +74,16 @@ class PredictionRequest(BaseModel):
     trip_id: str | None = None
     trip: RawTripPayload | None = None
 
-    def has_input(self) -> bool:
-        return self.trip_id is not None or self.trip is not None
+    @model_validator(mode="after")
+    def validate_single_input(self) -> PredictionRequest:
+        if (self.trip_id is None) == (self.trip is None):
+            raise ValueError("Provide exactly one of trip_id or trip.")
+        return self
 
 
 class PredictionResponse(BaseModel):
     trip_id: str
-    predicted_sequence: list[int]
+    predicted_sequence: list[int | None]
     candidate_count: int
 
 
@@ -52,18 +94,29 @@ class InferenceService:
         self.model_name = self._select_model_name()
         self.model = self._load_model()
         self.preprocessor = self._load_optional("feature_scaler.joblib")
-        self.decoder = self._load_optional("hmm_decoder.joblib")
+        if self.preprocessor is None:
+            raise RuntimeError(
+                f"Feature preprocessor not found: "
+                f"{self.output_dir / 'feature_scaler.joblib'}"
+            )
+        validate_feature_preprocessor(self.preprocessor)
 
     def _select_model_name(self) -> str:
         best_params_path = self.output_dir / "optimization_best_params.json"
         if best_params_path.is_file():
             try:
-                import json
-
                 with best_params_path.open("r", encoding="utf-8") as handle:
-                    name = json.load(handle).get("model")
-                if isinstance(name, str):
+                    configuration = json.load(handle)
+                name = (
+                    configuration.get("model")
+                    if isinstance(configuration, dict)
+                    else None
+                )
+                if isinstance(name, str) and name in SUPPORTED_MODELS:
                     return name
+                LOGGER.warning(
+                    "Ignoring unsupported model name in %s", best_params_path
+                )
             except (OSError, ValueError, json.JSONDecodeError):
                 LOGGER.exception("Could not read optimization best parameters")
 
@@ -74,6 +127,7 @@ class InferenceService:
                 rows = comparison.loc[
                     comparison["evaluation"].eq("train_cross_validation")
                 ].dropna(subset=["macro_f1_score"])
+                rows = rows.loc[rows["model"].isin(SUPPORTED_MODELS)]
                 if not rows.empty:
                     return str(
                         rows.sort_values(
@@ -82,7 +136,7 @@ class InferenceService:
                             kind="stable",
                         ).iloc[0]["model"]
                     )
-            except (OSError, pd.errors.ParserError, ValueError):
+            except (OSError, KeyError, pd.errors.ParserError, ValueError):
                 LOGGER.exception("Could not read baseline model comparison")
         return "logistic_regression"
 
@@ -92,7 +146,7 @@ class InferenceService:
             return None
         try:
             return joblib.load(path)
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, EOFError, ImportError) as error:
             LOGGER.exception("Could not load optional artifact %s: %s", path, error)
             raise RuntimeError(f"Artifact could not be loaded: {filename}") from error
 
@@ -105,8 +159,10 @@ class InferenceService:
             if path.is_file():
                 try:
                     model = joblib.load(path)
-                except (OSError, ValueError) as error:
-                    raise RuntimeError(f"Model could not be loaded: {path.name}") from error
+                except (OSError, ValueError, EOFError, ImportError) as error:
+                    raise RuntimeError(
+                        f"Model could not be loaded: {path.name}"
+                    ) from error
                 LOGGER.info("Loaded model artifact %s", path)
                 return model
         raise RuntimeError(
@@ -123,7 +179,9 @@ class InferenceService:
                 return trip_dir
         raise HTTPException(status_code=404, detail=f"Trip {trip_id!r} not found.")
 
-    def write_raw_trip(self, trip: RawTripPayload) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
+    def write_raw_trip(
+        self, trip: RawTripPayload
+    ) -> tuple[Path, tempfile.TemporaryDirectory[str]]:
         temporary = tempfile.TemporaryDirectory(prefix="pathsnap-trip-")
         trip_dir = Path(temporary.name) / "raw_trip"
         trip_dir.mkdir()
@@ -142,9 +200,10 @@ class InferenceService:
         write_rows("track", trip.track)
         write_rows("nodes", trip.nodes)
         write_rows("arcs", trip.arcs)
+        (trip_dir / f"{trip_id}.route").touch()
         return trip_dir, temporary
 
-    def predict_trip(self, trip_dir: Path) -> tuple[list[int], int]:
+    def predict_trip(self, trip_dir: Path) -> tuple[list[int | None], int]:
         candidate_features = extract_trip_features(trip_dir, "student_test")
         if candidate_features.empty:
             raise HTTPException(
@@ -152,26 +211,23 @@ class InferenceService:
                 detail="Trip data did not produce any candidate road arcs.",
             )
 
-        probabilities = model_probabilities(self.model, candidate_features)
-        arcs: dict[int, tuple[int, int]] = {}
-        arcs_path = trip_dir / f"{trip_dir.name}.arcs"
-        if arcs_path.is_file():
-            arcs_frame = pd.read_csv(
-                arcs_path, sep=r"\s+", header=None, names=["from_node", "to_node"]
-            )
-            arcs = {
-                arc_id: (int(row.from_node), int(row.to_node))
-                for arc_id, row in enumerate(
-                    arcs_frame.itertuples(index=False), start=0
-                )
-            }
-
-        predicted_sequence = viterbi_route(
+        probabilities = model_probabilities(
+            self.model,
             candidate_features,
-            probabilities,
-            arcs,
-            decoder=self.decoder,
+            preprocessor=self.preprocessor,
         )
+        trip = load_trip(trip_dir)
+        candidates = candidate_features[
+            [
+                "observation_index",
+                "arc_id",
+                "distance_to_segment_m",
+                "heading_alignment",
+            ]
+        ].copy()
+        candidates["classifier_probability"] = probabilities
+        decoder = ViterbiDecoder(trip["nodes"], trip["arcs"])
+        predicted_sequence = decoder.decode(trip["track"], candidates)
         return predicted_sequence, len(candidate_features)
 
 
@@ -199,39 +255,34 @@ def health() -> dict[str, str]:
 
 @app.post("/predict_route", response_model=PredictionResponse)
 def predict_route(request: PredictionRequest) -> PredictionResponse:
-    if not request.has_input():
-        raise HTTPException(
-            status_code=422,
-            detail="Provide exactly one of trip_id or trip.",
-        )
-    if request.trip_id is not None and request.trip is not None:
-        raise HTTPException(
-            status_code=422,
-            detail="Provide exactly one of trip_id or trip.",
-        )
-
-    service = get_service()
     temporary = None
     try:
+        service = get_service()
         if request.trip_id is not None:
             trip_dir = service.resolve_trip(request.trip_id)
             response_trip_id = request.trip_id
-        else:
+        elif request.trip is not None:
             trip_dir, temporary = service.write_raw_trip(request.trip)
             response_trip_id = "raw"
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="Provide exactly one of trip_id or trip.",
+            )
 
         sequence, candidate_count = service.predict_trip(trip_dir)
-        LOGGER.info(
-            "Successful inference trip_id=%s candidates=%d predicted_arcs=%d",
-            response_trip_id,
-            candidate_count,
-            len(sequence),
-        )
-        return PredictionResponse(
+        response = PredictionResponse(
             trip_id=response_trip_id,
             predicted_sequence=sequence,
             candidate_count=candidate_count,
         )
+        LOGGER.info(
+            "Successful inference request trip_id=%s candidates=%d",
+            response_trip_id,
+            candidate_count,
+        )
+        LOGGER.info("Inference response: %s", response.model_dump_json())
+        return response
     except HTTPException:
         raise
     except (OSError, ValueError, RuntimeError) as error:
